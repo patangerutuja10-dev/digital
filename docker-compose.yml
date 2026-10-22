@@ -1,0 +1,21 @@
+volumes:
+  library_workflow_pg_data:
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: library_workflow_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: library_user
+      POSTGRES_PASSWORD: library_pass
+      POSTGRES_DB: library_workflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - library_workflow_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U library_user -d library_workflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10

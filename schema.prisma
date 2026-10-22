@@ -1,0 +1,202 @@
+// Digital Library Book Recommendation & Procurement Workflow System
+// -------------------------------------------------------------------
+// PostgreSQL via Prisma. Run `docker compose up -d` from the project root to
+// start a local Postgres instance matching the default DATABASE_URL in
+// .env.example — no manual Postgres install needed.
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ------------------------- Identity & RBAC -------------------------
+
+model Role {
+  id          String     @id @default(cuid())
+  key         String     @unique // e.g. STUDENT, HOD, PRINCIPAL
+  label       String
+  description String?
+  users       UserRole[]
+  stages      WorkflowStage[]
+  createdAt   DateTime   @default(now())
+}
+
+model User {
+  id           String     @id @default(cuid())
+  email        String     @unique
+  passwordHash String
+  fullName     String
+  department   String?
+  isActive     Boolean    @default(true)
+  isDemo       Boolean    @default(false)
+  roles        UserRole[]
+  requests     BookRequest[]     @relation("RequestedBy")
+  supports     Support[]
+  approvals    Approval[]
+  auditLogs    AuditLog[]
+  notifications Notification[]
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+}
+
+model UserRole {
+  id     String @id @default(cuid())
+  userId String
+  roleId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role   Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, roleId])
+}
+
+// ------------------------- Workflow config -------------------------
+// Stages are data, not code. Admins can reorder/edit these at runtime.
+
+model WorkflowStage {
+  id                  String   @id @default(cuid())
+  key                 String   @unique // e.g. SUBMITTED, UNDER_REVIEW, HOD_REVIEW
+  label               String
+  order               Int      // ascending order of the "happy path"
+  requiredRoleId      String?  // role allowed to act at this stage (null = system stage)
+  requiredRole        Role?    @relation(fields: [requiredRoleId], references: [id])
+  requiresSupport     Boolean  @default(false)
+  isTerminal          Boolean  @default(false) // COMPLETED / REJECTED style end-states
+  isActive            Boolean  @default(true)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}
+
+model SystemConfig {
+  key       String   @id
+  value     String   // stored as string, parsed by consumers (e.g. "10" for a count)
+  label     String
+  updatedAt DateTime @updatedAt
+}
+
+// ------------------------- Catalogue (demo adapter) -------------------------
+// Real integration with the college LMS is NOT implemented — this is local
+// demo data behind an interface (see services/catalogueService.ts) so a
+// LMSCatalogueService can be substituted later without touching callers.
+
+model CatalogueBook {
+  id          String   @id @default(cuid())
+  title       String
+  author      String
+  publication String?
+  isbn        String?
+  copiesOwned Int      @default(0)
+  createdAt   DateTime @default(now())
+}
+
+// ------------------------- Book Requests -------------------------
+
+model BookRequest {
+  id                String   @id @default(cuid())
+  displayId         String   @unique // e.g. BR-2026-0001
+  requestedById     String
+  requestedBy       User     @relation("RequestedBy", fields: [requestedById], references: [id])
+  currentStageKey   String   // FK-by-key into WorkflowStage.key (kept simple/queryable)
+  status            String   @default("DRAFT")
+  // DRAFT | SUBMITTED | SUPPORT_COLLECTION | UNDER_REVIEW | HOD_REVIEW |
+  // PRINCIPAL_REVIEW | LIBRARIAN_VERIFICATION | PROCUREMENT | COMPLETED |
+  // REJECTED | RETURNED_FOR_CORRECTION
+  items             RequestItem[]
+  supports          Support[]
+  approvals         Approval[]
+  auditLogs         AuditLog[]
+  notifications     Notification[]
+  procurement       ProcurementRecord?
+  cancelledAt       DateTime?
+  cancelReason      String?
+  archivedAt        DateTime? // set when a completed/rejected/cancelled request is cleared from the active list (not hard-deleted; audit trail is preserved)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+// Mirrors the exact fields on the paper "Library Book Recommendation Form"
+model RequestItem {
+  id             String      @id @default(cuid())
+  bookRequestId  String
+  bookRequest    BookRequest @relation(fields: [bookRequestId], references: [id], onDelete: Cascade)
+  author         String
+  title          String
+  publication    String?
+  copiesRequired Int         @default(1)
+  approxCost     Float?
+  remark         String?
+  neededWithinDays     Int?     // "kitne din mein chahiye" from the paper form
+  photocopyAcceptable  Boolean  @default(false) // Xerox/photocopy okay as an interim if book isn't available
+  createdAt      DateTime    @default(now())
+}
+
+model Support {
+  id            String      @id @default(cuid())
+  bookRequestId String
+  bookRequest   BookRequest @relation(fields: [bookRequestId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User        @relation(fields: [userId], references: [id])
+  comment       String?
+  createdAt     DateTime    @default(now())
+
+  @@unique([bookRequestId, userId]) // one account can support a request only once
+}
+
+model Approval {
+  id            String      @id @default(cuid())
+  bookRequestId String
+  bookRequest   BookRequest @relation(fields: [bookRequestId], references: [id], onDelete: Cascade)
+  stageKey      String
+  actorId       String
+  actor         User        @relation(fields: [actorId], references: [id])
+  roleKeyAtTime String
+  decision      String      // APPROVE | REJECT | RETURN
+  comment       String?
+  createdAt     DateTime    @default(now())
+}
+
+model AuditLog {
+  id            String       @id @default(cuid())
+  bookRequestId String?
+  bookRequest   BookRequest? @relation(fields: [bookRequestId], references: [id], onDelete: Cascade)
+  userId        String?
+  user          User?        @relation(fields: [userId], references: [id])
+  roleKeyAtTime String?
+  action        String       // e.g. REQUEST_CREATED, SUPPORT_ADDED, APPROVED, REJECTED...
+  metadata      String?      // JSON-stringified extra detail
+  createdAt     DateTime     @default(now())
+  // No update/delete route is exposed for this model anywhere in the API.
+}
+
+model ProcurementRecord {
+  id                 String      @id @default(cuid())
+  bookRequestId      String      @unique
+  bookRequest        BookRequest @relation(fields: [bookRequestId], references: [id], onDelete: Cascade)
+  availableInLibrary Boolean     @default(false)
+  orderSentTo        String?
+  orderNumber        String?
+  orderDate          DateTime?
+  totalBudget        Float?
+  orderAmount        Float?
+  balanceAvailable   Float?      // computed server-side: totalBudget - orderAmount
+  billNumber         String?
+  billDate           DateTime?
+  billAmount         Float?
+  accessionedAt      DateTime?
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+}
+
+model Notification {
+  id            String       @id @default(cuid())
+  userId        String
+  user          User         @relation(fields: [userId], references: [id])
+  bookRequestId String?
+  bookRequest   BookRequest? @relation(fields: [bookRequestId], references: [id], onDelete: Cascade)
+  message       String
+  isRead        Boolean      @default(false)
+  createdAt     DateTime     @default(now())
+}
